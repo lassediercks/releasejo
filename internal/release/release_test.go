@@ -25,6 +25,7 @@ type fakeForge struct {
 	created     []forge.Pull
 	releases    []string // tags released
 	edits       int
+	deletes     int // number of DeleteBranch (reset) calls
 	labelSet    map[int][]int64
 }
 
@@ -49,6 +50,11 @@ func (f *fakeForge) BranchExists(_ context.Context, name string) (bool, error) {
 }
 func (f *fakeForge) CreateBranch(_ context.Context, name, _ string) error {
 	f.branches[name] = true
+	return nil
+}
+func (f *fakeForge) DeleteBranch(_ context.Context, name string) error {
+	f.branches[name] = false
+	f.deletes++
 	return nil
 }
 func (f *fakeForge) GetFile(_ context.Context, path, ref string) (*forge.File, error) {
@@ -153,6 +159,33 @@ func TestRunFirstRelease(t *testing.T) {
 	// all release files land in a SINGLE commit (not one per file)
 	if f.commitCount != 1 {
 		t.Errorf("expected 1 release commit, got %d", f.commitCount)
+	}
+}
+
+// A release branch left over from a prior run must be REBUILT from base, not
+// written onto in place — otherwise its non-release files (e.g. a CI workflow
+// fixed on main) stay frozen and release commits stack. Guards the fix for the
+// "branch never reset to base" bug.
+func TestRunResetsExistingReleaseBranch(t *testing.T) {
+	f := newFake()
+	f.commits["."] = []forge.Commit{
+		{SHA: "c1", Message: "feat: add the thing"},
+	}
+	man := config.Manifest{".": "0.0.0"}
+	const branch = "releasejo--branches--main"
+	f.branches[branch] = true // a stale branch from a previous run
+
+	if err := Run(context.Background(), f, goConfig(), man, Options{TargetBranch: "main", Now: fixedClock()}); err != nil {
+		t.Fatal(err)
+	}
+	if f.deletes != 1 {
+		t.Errorf("existing release branch must be reset (deleted) once; got %d deletes", f.deletes)
+	}
+	if !f.branches[branch] {
+		t.Errorf("branch must be recreated from base after the reset")
+	}
+	if f.commitCount != 1 {
+		t.Errorf("expected 1 release commit after reset, got %d", f.commitCount)
 	}
 }
 

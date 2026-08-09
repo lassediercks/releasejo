@@ -33,6 +33,7 @@ type API interface {
 	Commits(ctx context.Context, sha, path string, max int) ([]forge.Commit, error)
 	BranchExists(ctx context.Context, name string) (bool, error)
 	CreateBranch(ctx context.Context, name, from string) error
+	DeleteBranch(ctx context.Context, name string) error
 	GetFile(ctx context.Context, path, ref string) (*forge.File, error)
 	ChangeFiles(ctx context.Context, branch, message string, files []forge.FileChange) error
 	Pulls(ctx context.Context, state string) ([]forge.Pull, error)
@@ -191,14 +192,26 @@ func buildAndUpsertPR(ctx context.Context, cl API, man config.Manifest, plans []
 		return nil
 	}
 
+	// Rebuild the branch from base EVERY run so its tree matches base except for
+	// the release files. Without this the branch stays frozen at its fork point:
+	// non-release files (e.g. a CI workflow fixed on main) stay stale — so the
+	// release PR runs outdated config while main is green — and release commits
+	// stack (repeated identical versions). Delete-then-recreate is the API-only
+	// equivalent of release-please's force-push; on Forgejo the open PR survives
+	// a head-branch delete+recreate (verified), so the existing PR is reused
+	// below rather than churned. Only reached when there IS a release to make
+	// (callers gate on len(plans) > 0), so this can never reset a no-op branch.
 	exists, err := cl.BranchExists(ctx, branch)
 	if err != nil {
 		return err
 	}
-	if !exists {
-		if err := cl.CreateBranch(ctx, branch, opts.TargetBranch); err != nil {
-			return fmt.Errorf("creating release branch: %w", err)
+	if exists {
+		if err := cl.DeleteBranch(ctx, branch); err != nil {
+			return fmt.Errorf("resetting release branch to base: %w", err)
 		}
+	}
+	if err := cl.CreateBranch(ctx, branch, opts.TargetBranch); err != nil {
+		return fmt.Errorf("creating release branch: %w", err)
 	}
 
 	// Every file's desired content derives from BASE, so re-running is
