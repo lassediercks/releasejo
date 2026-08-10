@@ -35,6 +35,22 @@ func TestParse(t *testing.T) {
 			wantLevel: semver.Patch,
 		},
 		{
+			name:      "perf is patch (release-please compat)",
+			message:   "perf: cache the lookup",
+			wantType:  "perf",
+			wantDesc:  "cache the lookup",
+			wantConv:  true,
+			wantLevel: semver.Patch,
+		},
+		{
+			name:      "revert is patch (release-please compat)",
+			message:   "revert: roll back the migration",
+			wantType:  "revert",
+			wantDesc:  "roll back the migration",
+			wantConv:  true,
+			wantLevel: semver.Patch,
+		},
+		{
 			name:         "bang marks breaking major",
 			message:      "feat!: drop node 14",
 			wantType:     "feat",

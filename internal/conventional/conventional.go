@@ -106,8 +106,10 @@ func hasBreakingFooter(msg string) bool {
 func (c Commit) IsConventional() bool { return c.Type != "" }
 
 // Level returns the semver bump this commit implies: a breaking change is Major,
-// "feat" is Minor, "fix" is Patch, and everything else (chore, docs, refactor,
-// or a non-conventional message) is None.
+// "feat" is Minor, "fix"/"perf"/"revert" are Patch, and everything else (chore,
+// docs, refactor, or a non-conventional message) is None — matching
+// release-please's conventionalcommits preset, which releases on perf and revert
+// too (a perf improvement or a revert is a shippable change, not just noise).
 func (c Commit) Level() semver.Level {
 	if c.Breaking {
 		return semver.Major
@@ -115,7 +117,7 @@ func (c Commit) Level() semver.Level {
 	switch c.Type {
 	case "feat":
 		return semver.Minor
-	case "fix":
+	case "fix", "perf", "revert":
 		return semver.Patch
 	default:
 		return semver.None
