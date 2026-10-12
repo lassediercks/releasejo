@@ -15,6 +15,7 @@ func TestParse(t *testing.T) {
 		wantBreaking bool
 		wantDesc     string
 		wantBody     string
+		wantRelAs    string
 		wantConv     bool
 		wantLevel    semver.Level
 	}{
@@ -174,6 +175,64 @@ func TestParse(t *testing.T) {
 			wantConv:  true,
 			wantLevel: semver.None,
 		},
+		{
+			name:      "release-as footer captured",
+			message:   "fix: small fix\n\nRelease-As: 1.2.3",
+			wantType:  "fix",
+			wantDesc:  "small fix",
+			wantBody:  "Release-As: 1.2.3",
+			wantRelAs: "1.2.3",
+			wantConv:  true,
+			wantLevel: semver.Patch,
+		},
+		{
+			name:      "release-as key is case-insensitive",
+			message:   "fix: small fix\n\nrelease-as: 1.2.3",
+			wantType:  "fix",
+			wantDesc:  "small fix",
+			wantBody:  "release-as: 1.2.3",
+			wantRelAs: "1.2.3",
+			wantConv:  true,
+			wantLevel: semver.Patch,
+		},
+		{
+			name:      "release-as shouted key, leading v stripped",
+			message:   "feat: thing\n\nRELEASE-AS: v2.0.0",
+			wantType:  "feat",
+			wantDesc:  "thing",
+			wantBody:  "RELEASE-AS: v2.0.0",
+			wantRelAs: "2.0.0",
+			wantConv:  true,
+			wantLevel: semver.Minor,
+		},
+		{
+			name:      "release-as value kept raw for the caller to validate",
+			message:   "fix: small fix\n\nRelease-As: banana",
+			wantType:  "fix",
+			wantDesc:  "small fix",
+			wantBody:  "Release-As: banana",
+			wantRelAs: "banana",
+			wantConv:  true,
+			wantLevel: semver.Patch,
+		},
+		{
+			name:      "release-as in the subject is not a footer",
+			message:   "fix: release-as: 1.2.3",
+			wantType:  "fix",
+			wantDesc:  "release-as: 1.2.3",
+			wantConv:  true,
+			wantLevel: semver.Patch,
+		},
+		{
+			name:      "last release-as footer wins within one commit",
+			message:   "fix: small fix\n\nRelease-As: 1.2.3\nRelease-As: 1.3.0",
+			wantType:  "fix",
+			wantDesc:  "small fix",
+			wantBody:  "Release-As: 1.2.3\nRelease-As: 1.3.0",
+			wantRelAs: "1.3.0",
+			wantConv:  true,
+			wantLevel: semver.Patch,
+		},
 	}
 
 	for _, tt := range tests {
@@ -194,6 +253,9 @@ func TestParse(t *testing.T) {
 			}
 			if c.Body != tt.wantBody {
 				t.Errorf("Body = %q, want %q", c.Body, tt.wantBody)
+			}
+			if c.ReleaseAs != tt.wantRelAs {
+				t.Errorf("ReleaseAs = %q, want %q", c.ReleaseAs, tt.wantRelAs)
 			}
 			if c.IsConventional() != tt.wantConv {
 				t.Errorf("IsConventional() = %v, want %v", c.IsConventional(), tt.wantConv)

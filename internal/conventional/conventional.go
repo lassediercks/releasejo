@@ -21,6 +21,7 @@ type Commit struct {
 	Breaking    bool   // true if header has "!" before ":" OR body/footer has a "BREAKING CHANGE:" / "BREAKING-CHANGE:" line
 	Description string // summary text after the "type(scope): " prefix (first line)
 	Body        string // everything after the first line, trimmed ("" if none)
+	ReleaseAs   string // raw value of a "Release-As:" footer, leading "v" stripped; "" if none. NOT validated here — callers parse it as semver.
 	Hash        string // the commit sha passed in
 	Raw         string // the raw message passed in
 }
@@ -39,6 +40,13 @@ var headerRe = regexp.MustCompile(`(?i)^(\w+)(\(([^)]+)\))?(!)?: (.+)$`)
 // this pattern is intentionally case-sensitive — a lowercase "breaking change:"
 // is prose, not a declaration.
 var breakingRe = regexp.MustCompile(`^BREAKING[ -]CHANGE:`)
+
+// releaseAsRe matches a "Release-As:" footer line, which pins the next release
+// to an explicit version. Unlike BREAKING CHANGE, release-please accepts the key
+// in any case ("Release-As", "release-as", "RELEASE-AS"), so this pattern is
+// case-insensitive. Group 2 is the value with an optional leading "v" dropped;
+// whether it is a usable version is decided by the caller, not here.
+var releaseAsRe = regexp.MustCompile(`(?i)^release-as:[ \t]*(v)?(.+)$`)
 
 // Parse extracts commit metadata from a raw message. hash is stored verbatim on
 // the returned Commit. A message whose first line is not a valid Conventional
@@ -61,9 +69,10 @@ func Parse(message, hash string) Commit {
 	body := strings.TrimSpace(rest)
 
 	c := Commit{
-		Hash: hash,
-		Raw:  message,
-		Body: body,
+		Hash:      hash,
+		Raw:       message,
+		Body:      body,
+		ReleaseAs: releaseAsFooter(rest),
 	}
 
 	// A breaking change can be declared in the body/footer regardless of the
@@ -100,6 +109,22 @@ func hasBreakingFooter(msg string) bool {
 		}
 	}
 	return false
+}
+
+// releaseAsFooter returns the value of a "Release-As:" footer in body (the
+// message minus its header line), with any leading "v" and surrounding
+// whitespace removed. The header is excluded on purpose: "fix: release-as: 1.2.3"
+// is a subject line, not a footer. If several lines declare one, the last wins —
+// a later footer overrides an earlier one, mirroring "the newest request wins"
+// across commits.
+func releaseAsFooter(body string) string {
+	out := ""
+	for _, line := range strings.Split(body, "\n") {
+		if m := releaseAsRe.FindStringSubmatch(strings.TrimRight(line, " \t\r")); m != nil {
+			out = strings.TrimSpace(m[2])
+		}
+	}
+	return out
 }
 
 // IsConventional reports whether the message parsed as a Conventional Commit.

@@ -142,12 +142,16 @@ func computePlans(ctx context.Context, cl API, cfg *config.Config, man config.Ma
 			ccs = append(ccs, cc)
 			level = semver.Max(level, cc.Level())
 		}
-		if level == semver.None {
+		next, overridden := nextVersion(p, last, level, ccs, opts.Logf)
+		// Release unless the commits imply no bump — except when a Release-As
+		// request raised the version, which releases on its own (release-please
+		// opens a release PR for release-as even without releasable commits), as
+		// long as there is something to release since the tag.
+		if level == semver.None && !(overridden && len(ccs) > 0) {
 			opts.Logf("%s: nothing to release", label(p))
 			continue
 		}
 
-		next := bumpFor(p, last, level)
 		compareURL := "" // reserved: a Forgejo compare link once we track the base sha
 		entry := changelog.Render(next.String(), date, ccs, sections(p), compareURL)
 		plans = append(plans, pkgPlan{
@@ -482,6 +486,59 @@ func compName(p config.Package) string {
 		return "root"
 	}
 	return p.Path
+}
+
+// nextVersion is the single place a release's version is decided: the package's
+// normal bump, then any Release-As override. Every downstream use (PR title,
+// changelog heading, version files, manifest, and so the tag cut on merge) reads
+// the version this returns, so an override never has to be applied twice.
+//
+// Precedence follows release-please: the config's "release-as" wins over a
+// "Release-As:" commit footer, which wins over the conventional-commit bump. The
+// winning request is the only one considered — if it is unusable the normal bump
+// applies, rather than silently falling back to a lower-priority request.
+//
+// A request is refused, with a warning, when it is not a valid semver or is not
+// greater than the current version: releases never go backwards, and that is
+// also what makes a Release-As footer a one-shot — once the version it asks for
+// is released, asking again is a no-op.
+//
+// The second result reports whether an override was applied, so the caller can
+// release on a Release-As request alone (no releasable commits needed).
+func nextVersion(p config.Package, last semver.Version, level semver.Level, ccs []conventional.Commit, logf func(string, ...any)) (semver.Version, bool) {
+	bumped := bumpFor(p, last, level)
+
+	want, source := releaseAsRequest(p, ccs)
+	if want == "" {
+		return bumped, false
+	}
+	v, err := semver.Parse(want)
+	if err != nil {
+		logf("%s: ignoring release-as %q (%s): not a valid version", label(p), want, source)
+		return bumped, false
+	}
+	if v.Compare(last) <= 0 {
+		logf("%s: ignoring release-as %s (%s): not greater than the current version %s", label(p), v, source, last)
+		return bumped, false
+	}
+	logf("%s: release-as %s (%s) overrides the computed %s", label(p), v, source, bumped)
+	return v, true
+}
+
+// releaseAsRequest returns the requested release version and a human-readable
+// source for logs. The config key beats a commit footer; among footers the
+// newest commit wins (cl.Commits returns newest-first, and ccs preserves that
+// order). The value is returned unvalidated.
+func releaseAsRequest(p config.Package, ccs []conventional.Commit) (want, source string) {
+	if p.ReleaseAs != "" {
+		return p.ReleaseAs, "config release-as"
+	}
+	for _, c := range ccs {
+		if c.ReleaseAs != "" {
+			return c.ReleaseAs, "footer on " + short(c.Hash)
+		}
+	}
+	return "", ""
 }
 
 // bumpFor applies the package's versioning strategy. `always-bump-patch` /

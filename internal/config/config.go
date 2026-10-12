@@ -21,6 +21,12 @@ type Package struct {
 
 	BumpMinorPreMajor bool `json:"bump-minor-pre-major,omitempty"`
 
+	// ReleaseAs pins the next release to an explicit version, overriding the
+	// conventional-commit bump. Stored verbatim (leading "v" included); it is
+	// validated where the version is computed, so a typo warns instead of
+	// failing the whole run.
+	ReleaseAs string `json:"release-as,omitempty"`
+
 	// versioning strategy: "" / "default" (semantic), "always-bump-patch",
 	// or "always-bump-minor".
 	Versioning string `json:"versioning,omitempty"`
@@ -54,6 +60,7 @@ type rawConfig struct {
 	ReleaseType           string                `json:"release-type"`
 	Versioning            string                `json:"versioning"`
 	BumpMinorPreMajor     *bool                 `json:"bump-minor-pre-major"`
+	ReleaseAs             string                `json:"release-as"`
 	SeparatePullRequests  *bool                 `json:"separate-pull-requests"`
 	IncludeComponentInTag *bool                 `json:"include-component-in-tag"`
 	IncludeVInTag         *bool                 `json:"include-v-in-tag"`
@@ -69,6 +76,7 @@ type rawPackage struct {
 	PackageName           string             `json:"package-name"`
 	ChangelogPath         string             `json:"changelog-path"`
 	BumpMinorPreMajor     *bool              `json:"bump-minor-pre-major"`
+	ReleaseAs             *string            `json:"release-as"`
 	IncludeComponentInTag *bool              `json:"include-component-in-tag"`
 	IncludeVInTag         *bool              `json:"include-v-in-tag"`
 	TagSeparator          string             `json:"tag-separator"`
@@ -106,6 +114,7 @@ func ParseConfig(b []byte) (*Config, error) {
 			PackageName:           rp.PackageName,
 			ChangelogPath:         strOr(rp.ChangelogPath, "CHANGELOG.md"),
 			BumpMinorPreMajor:     boolOr(orPtr(rp.BumpMinorPreMajor, raw.BumpMinorPreMajor), false),
+			ReleaseAs:             strPtrOr(rp.ReleaseAs, raw.ReleaseAs),
 			IncludeComponentInTag: orPtr(rp.IncludeComponentInTag, raw.IncludeComponentInTag),
 			IncludeVInTag:         orPtr(rp.IncludeVInTag, raw.IncludeVInTag),
 			TagSeparator:          strOr(rp.TagSeparator, strOr(raw.TagSeparator, "-")),
