@@ -26,8 +26,20 @@ type fakeForge struct {
 	created     []forge.Pull
 	releases    []string // tags released
 	edits       int
-	deletes     int // number of DeleteBranch (reset) calls
+	edited      []int // PR numbers passed to EditPull, in order
+	deletes     int   // number of DeleteBranch (reset) calls
+	closedBy    int   // PRs auto-closed because their head branch was deleted
 	labelSet    map[int][]int64
+}
+
+// pull returns the PR with that number, or nil.
+func (f *fakeForge) pull(number int) *forge.Pull {
+	for i := range f.pulls {
+		if f.pulls[i].Number == number {
+			return &f.pulls[i]
+		}
+	}
+	return nil
 }
 
 func newFake() *fakeForge {
@@ -53,9 +65,19 @@ func (f *fakeForge) CreateBranch(_ context.Context, name, _ string) error {
 	f.branches[name] = true
 	return nil
 }
+
+// DeleteBranch removes a branch. Forgejo CLOSES any open PR whose head branch is
+// deleted — the behaviour that left release PRs closed — so the fake models it;
+// the release flow has to cope.
 func (f *fakeForge) DeleteBranch(_ context.Context, name string) error {
 	f.branches[name] = false
 	f.deletes++
+	for i := range f.pulls {
+		if f.pulls[i].Head.Ref == name && f.pulls[i].State == "open" && !f.pulls[i].Merged {
+			f.pulls[i].State = "closed"
+			f.closedBy++
+		}
+	}
 	return nil
 }
 func (f *fakeForge) GetFile(_ context.Context, path, ref string) (*forge.File, error) {
@@ -95,9 +117,20 @@ func (f *fakeForge) CreatePull(_ context.Context, head, base, title, body string
 	p := forge.Pull{Number: 100 + len(f.created), Title: title, Body: body, State: "open"}
 	p.Head.Ref = head
 	f.created = append(f.created, p)
+	f.pulls = append(f.pulls, p) // a later run must see it, like the real API
 	return &p, nil
 }
-func (f *fakeForge) EditPull(_ context.Context, _ int, _, _ string) error      { f.edits++; return nil }
+
+// EditPull refreshes title/body and REOPENS the PR, mirroring the real client,
+// which sends state:"open" on every edit.
+func (f *fakeForge) EditPull(_ context.Context, number int, title, body string) error {
+	f.edits++
+	f.edited = append(f.edited, number)
+	if p := f.pull(number); p != nil {
+		p.Title, p.Body, p.State = title, body, "open"
+	}
+	return nil
+}
 func (f *fakeForge) EnsureLabel(_ context.Context, _, _ string) (int64, error) { return 7, nil }
 func (f *fakeForge) SetIssueLabels(_ context.Context, number int, ids []int64) error {
 	f.labelSet[number] = ids
@@ -468,5 +501,146 @@ func TestReleaseAsNoCommitsSinceTag(t *testing.T) {
 	f, _ := runWith(t, releaseAsConfig(t, "1.0.0"), "0.0.5")
 	if len(f.created) != 0 {
 		t.Errorf("expected no PR with no commits since the tag, got %d", len(f.created))
+	}
+}
+
+// ---- release PR reuse (branch reset closes the PR) -------------------------
+
+const releaseBranch = "releasejo--branches--main"
+
+// pendingPull is a release PR on the release branch in the given state.
+func pendingPull(number int, state string, labels ...forge.Label) forge.Pull {
+	p := forge.Pull{Number: number, State: state, Labels: labels}
+	p.Head.Ref = releaseBranch
+	return p
+}
+
+// runRefresh executes one cycle with a stale release branch and the given PRs,
+// returning the fake and the log.
+func runRefresh(t *testing.T, current string, pulls ...forge.Pull) (*fakeForge, string) {
+	t.Helper()
+	f := newFake()
+	f.commits["."] = []forge.Commit{{SHA: "c1", Message: "fix: correct a boundary check"}}
+	f.branches[releaseBranch] = true // a branch from a previous run
+	f.pulls = pulls
+	l := &logSink{}
+	opts := Options{TargetBranch: "main", Now: fixedClock(), Logf: l.logf}
+	if err := Run(context.Background(), f, goConfig(), config.Manifest{".": current}, opts); err != nil {
+		t.Fatal(err)
+	}
+	return f, l.text()
+}
+
+// The branch reset deletes the head branch, which makes Forgejo close the PR.
+// The refresh must reopen THAT PR (same number), not leave it closed and not
+// open another one. Regression test for #93: "refreshing release PR #93"
+// followed by the PR being closed with no new PR opened.
+func TestRefreshReopensPRClosedByBranchReset(t *testing.T) {
+	f, logged := runRefresh(t, "0.0.6", pendingPull(93, "open", forge.Label{ID: 7, Name: pendingLabel}))
+
+	if f.deletes != 1 || f.closedBy != 1 {
+		t.Fatalf("expected the reset to delete the branch and close the PR; deletes=%d closedByReset=%d", f.deletes, f.closedBy)
+	}
+	if len(f.created) != 0 {
+		t.Errorf("expected no new PR to be opened, got %d", len(f.created))
+	}
+	if len(f.edited) != 1 || f.edited[0] != 93 {
+		t.Fatalf("expected PR #93 to be refreshed, edited=%v", f.edited)
+	}
+	pr := f.pull(93)
+	if pr == nil || pr.State != "open" {
+		t.Fatalf("PR #93 must be open at the end of the run, got %+v", pr)
+	}
+	if pr.Title != "chore(release): 0.0.7" {
+		t.Errorf("refreshed title = %q, want %q", pr.Title, "chore(release): 0.0.7")
+	}
+	if !strings.Contains(logged, "refreshing release PR #93") {
+		t.Errorf("expected a refresh log line, got:\n%s", logged)
+	}
+}
+
+// A PR a previous (broken) run left closed and unmerged is picked up and
+// reopened rather than replaced — this is what stops the number churning.
+func TestRefreshReusesClosedUnmergedPR(t *testing.T) {
+	f, _ := runRefresh(t, "0.0.6", pendingPull(93, "closed", forge.Label{ID: 7, Name: pendingLabel}))
+
+	if len(f.created) != 0 {
+		t.Errorf("expected the closed release PR to be reused, but %d new PR(s) were opened", len(f.created))
+	}
+	if len(f.edited) != 1 || f.edited[0] != 93 {
+		t.Fatalf("expected PR #93 to be refreshed, edited=%v", f.edited)
+	}
+	if pr := f.pull(93); pr == nil || pr.State != "open" {
+		t.Fatalf("PR #93 must be reopened, got %+v", pr)
+	}
+}
+
+// A MERGED release PR is not a refresh candidate: it is already released and
+// belongs to tagMerged. The run must open a fresh PR instead of reopening it.
+func TestRefreshIgnoresMergedPR(t *testing.T) {
+	f := newFake()
+	f.commits["."] = []forge.Commit{{SHA: "c1", Message: "fix: correct a boundary check"}}
+	f.branches[releaseBranch] = true
+	f.tags["v0.0.6"] = "t0" // already tagged, so tagMerged cuts nothing new
+	merged := pendingPull(93, "closed", forge.Label{ID: 7, Name: pendingLabel})
+	merged.Merged = true
+	merged.MergeCommitSHA = "mmm"
+	f.pulls = []forge.Pull{merged}
+
+	opts := Options{TargetBranch: "main", Now: fixedClock()}
+	if err := Run(context.Background(), f, goConfig(), config.Manifest{".": "0.0.6"}, opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.edited) != 0 {
+		t.Errorf("a merged PR must not be refreshed, edited=%v", f.edited)
+	}
+	if len(f.created) != 1 {
+		t.Fatalf("expected a fresh PR to be opened, got %d", len(f.created))
+	}
+	if ids := f.labelSet[f.created[0].Number]; len(ids) != 1 {
+		t.Errorf("expected the pending label on the new PR, got %v", ids)
+	}
+}
+
+// A closed PR on the release branch WITHOUT the pending label is not ours to
+// reopen (someone closed it deliberately); open a new one.
+func TestRefreshIgnoresClosedPRWithoutPendingLabel(t *testing.T) {
+	f, _ := runRefresh(t, "0.0.6", pendingPull(93, "closed"))
+
+	if len(f.edited) != 0 {
+		t.Errorf("an unlabelled closed PR must not be refreshed, edited=%v", f.edited)
+	}
+	if len(f.created) != 1 {
+		t.Errorf("expected a new PR, got %d", len(f.created))
+	}
+}
+
+// Two consecutive runs must keep ONE PR number: the first opens it, the second
+// refreshes (and reopens) the same one, even though the reset closed it.
+func TestRefreshKeepsPRNumberAcrossRuns(t *testing.T) {
+	f := newFake()
+	f.commits["."] = []forge.Commit{{SHA: "c1", Message: "fix: correct a boundary check"}}
+	man := config.Manifest{".": "0.0.6"}
+	opts := Options{TargetBranch: "main", Now: fixedClock()}
+
+	if err := Run(context.Background(), f, goConfig(), man, opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.created) != 1 {
+		t.Fatalf("first run should open 1 PR, got %d", len(f.created))
+	}
+	number := f.created[0].Number
+
+	if err := Run(context.Background(), f, goConfig(), man, opts); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.created) != 1 {
+		t.Errorf("second run must reuse PR #%d, but opened %d PRs in total", number, len(f.created))
+	}
+	if len(f.edited) != 1 || f.edited[0] != number {
+		t.Errorf("second run should refresh PR #%d, edited=%v", number, f.edited)
+	}
+	if pr := f.pull(number); pr == nil || pr.State != "open" {
+		t.Fatalf("PR #%d must be open after the second run, got %+v", number, pr)
 	}
 }

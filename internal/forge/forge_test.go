@@ -204,6 +204,32 @@ func TestPullsAndCreate(t *testing.T) {
 	}
 }
 
+// EditPull must send state:"open" alongside title/body: resetting the release
+// branch deletes its head branch and Forgejo closes the PR, so a refresh has to
+// reopen it or the release PR silently stays closed.
+func TestEditPullReopens(t *testing.T) {
+	var got map[string]any
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantAuth(t, r)
+		if r.Method != "PATCH" || !strings.HasSuffix(r.URL.Path, "/pulls/93") {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		w.Write([]byte(`{"number":93,"state":"open"}`))
+	}))
+	if err := c.EditPull(context.Background(), 93, "chore(release): 0.0.7", "body"); err != nil {
+		t.Fatal(err)
+	}
+	if got["state"] != "open" {
+		t.Errorf("PATCH body state = %v, want \"open\" (a refresh must reopen the PR)", got["state"])
+	}
+	if got["title"] != "chore(release): 0.0.7" || got["body"] != "body" {
+		t.Errorf("PATCH body = %v, want the new title/body", got)
+	}
+}
+
 func TestEnsureLabelFindsThenCreates(t *testing.T) {
 	existing := true
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
