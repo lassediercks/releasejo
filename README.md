@@ -77,6 +77,59 @@ Same files as release-please:
 Supported keys and release-types: see [docs/config.md](docs/config.md).
 Migrating from release-please: [docs/migrating-from-release-please.md](docs/migrating-from-release-please.md).
 
+### Release-As
+
+To release a specific version instead of the one the commits imply — cutting
+`1.0.0`, jumping a minor, correcting a mis-numbered release — pin it, as in
+release-please, either per commit or in the config.
+
+**Commit footer** (any commit since the last release tag):
+
+```
+fix: correct the retry budget
+
+Release-As: 1.0.0
+```
+
+The key is case-insensitive (`Release-As`, `release-as`, `RELEASE-AS`) and a
+leading `v` is accepted (`Release-As: v1.0.0`). If several commits carry one, the
+**newest** wins.
+
+**Config key** (global default, or per package):
+
+```json
+{
+  "release-type": "go",
+  "release-as": "1.0.0",
+  "packages": { ".": { "component": "root" } }
+}
+```
+
+Precedence: **config `release-as` > commit footer > the conventional-commit
+bump.** The pinned version is used everywhere the computed one would be — PR
+title, changelog heading, version files, the manifest, and the tag cut when the
+release PR merges.
+
+Validation — a request that fails either check is **ignored with a warning on
+stderr** and the normal bump applies:
+
+- it must be a valid `major.minor.patch` (so `banana` or `1.2` is rejected);
+- it must be **greater than the current version** in the manifest. Releases never
+  go backwards — which is also why a footer is a one-shot: once the version it
+  asks for is released, the request is behind the tag boundary and asking for it
+  again is refused.
+
+A valid request releases on its own, as in release-please: it opens a release PR
+even when no commit implies a bump (a `chore:`-only range still cuts the pinned
+release). With no commits at all since the tag there is still nothing to release.
+
+**Remove `release-as` from the config once the release lands.** Unlike a commit
+footer — which falls behind the tag boundary and is gone — the config key stays,
+and keeps asking for the same version on every later run. `releasejo` refuses it
+once it is no longer greater than the current version, so later releases bump
+normally rather than staying pinned, but every run warns about it until the key
+is deleted. A commit footer needs no cleanup.
+
 ## How it works
 
 On every push to the target branch, `releasejo`:
@@ -85,7 +138,8 @@ On every push to the target branch, `releasejo`:
    Release for each package whose manifest version isn't tagged yet.
 2. **(Re)builds the release PR.** It collects commits since each package's last
    release tag, computes the next semver (conventional-commit driven, with
-   `bump-minor-pre-major` support), regenerates the changelog, bumps version
+   `bump-minor-pre-major` support and any [Release-As](#release-as) override),
+   regenerates the changelog, bumps version
    files + the manifest, and opens or refreshes the `autorelease: pending` PR.
 
 The release branch is always rebuilt from the base branch's content, so
@@ -94,7 +148,8 @@ re-running never stacks duplicate changelog entries.
 ## Status & scope (v0.x)
 
 Implemented and tested: conventional-commit parsing, semver bump (incl.
-pre-1.0 semantics), release-please config + manifest parsing, changelog
+pre-1.0 semantics), `Release-As` overrides (footer + config),
+release-please config + manifest parsing, changelog
 generation, version updaters (`go`, `simple`, `node`, generic
 `x-release-please-version` markers), monorepo **`separate-pull-requests`**, and
 the release-PR + tag-on-merge orchestration against the Forgejo/Gitea REST API.

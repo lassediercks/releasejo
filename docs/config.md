@@ -13,6 +13,7 @@ Top-level keys act as **defaults** for every package; per-package keys override.
 | `release-type` | global + package | — (required) | `go`, `simple`, `node`, or any type (falls back to marker-only updates). |
 | `versioning` | global + package | `default` | `always-bump-patch` / `always-bump-minor` force that bump for any releasable change; `default` is the semantic (feat=minor, fix=patch, breaking=major) bump. |
 | `bump-minor-pre-major` | global + package | `false` | Pre-1.0: a breaking change bumps the minor and feat/fix bump the patch. |
+| `release-as` | global + package | — | Pin the next release to this version, overriding the commit-driven bump. Beats a `Release-As:` commit footer. Must be a valid `major.minor.patch` and greater than the manifest version, else it is ignored with a warning. **Delete it once the release lands** (see [Release-As](../README.md#release-as)). |
 | `separate-pull-requests` | global | `false` | When true, one release PR **per package** on `releasejo--branches--<base>--components--<component>` branches (rebuilt from base, so sequential merges reconcile the shared manifest). |
 | `include-component-in-tag` | global + package | `true` if >1 package | `<component><sep>v<version>` vs `v<version>`. |
 | `include-v-in-tag` | global + package | `true` | Leading `v` in the tag. |
