@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.7](https://github.com/lassediercksAI/releasejo/compare/v0.0.6...v0.0.7) (2026-10-12)
+
+
+### Bug Fixes
+
+* a refresh reopens the release PR the branch reset closed, instead of leaving it closed ([992f2c1](https://github.com/lassediercksAI/releasejo/commit/992f2c10eb7ab247345ec6b5037f15e32088e874))
+* a refresh reopens the release PR the branch reset closed, instead of leaving it closed ([96c067b](https://github.com/lassediercksAI/releasejo/commit/96c067b36532e61f6b42b129ea85a6a86c05c1b5))
+
 ## [0.0.6](https://github.com/lassediercksAI/releasejo/compare/v0.0.5...v0.0.6) (2026-10-12)
 
 
