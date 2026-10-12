@@ -44,6 +44,38 @@ func TestParseConfigDefaultsMerge(t *testing.T) {
 	}
 }
 
+// release-as follows the same precedence as the other defaults: a top-level
+// value applies to every package, a package-level value overrides it. The value
+// is kept verbatim — validity is decided where the version is computed.
+func TestParseConfigReleaseAs(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`{
+      "release-type": "go",
+      "release-as": "1.0.0",
+      "packages": {
+        ".": { "component": "root" },
+        "services/api": { "component": "api", "release-as": "2.3.4" }
+      }
+    }`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if got := cfg.Packages[0].ReleaseAs; got != "1.0.0" {
+		t.Errorf("root release-as = %q, want the top-level 1.0.0", got)
+	}
+	if got := cfg.Packages[1].ReleaseAs; got != "2.3.4" {
+		t.Errorf("api release-as = %q, want the package override 2.3.4", got)
+	}
+
+	// unset anywhere => empty, i.e. no override
+	cfg, err = ParseConfig([]byte(`{"release-type":"go","packages":{".":{}}}`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if got := cfg.Packages[0].ReleaseAs; got != "" {
+		t.Errorf("release-as = %q, want empty when unset", got)
+	}
+}
+
 func TestParseConfigErrors(t *testing.T) {
 	if _, err := ParseConfig([]byte(`{"packages":{}}`)); err == nil {
 		t.Error("empty packages should error")

@@ -2,6 +2,7 @@ package release
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -121,6 +122,13 @@ func goConfig() *config.Config {
 	}
 	return cfg
 }
+
+// logSink collects Logf output so tests can assert on the warnings that reach
+// stderr in production (main wires Logf to log.Printf).
+type logSink struct{ lines []string }
+
+func (l *logSink) logf(f string, a ...any) { l.lines = append(l.lines, fmt.Sprintf(f, a...)) }
+func (l *logSink) text() string            { return strings.Join(l.lines, "\n") }
 
 func TestRunFirstRelease(t *testing.T) {
 	f := newFake()
@@ -285,5 +293,180 @@ func TestTagOnMerge(t *testing.T) {
 	// PR relabelled to tagged (label id 7 set)
 	if _, ok := f.labelSet[42]; !ok {
 		t.Error("expected merged PR to be relabelled tagged")
+	}
+}
+
+// ---- Release-As -----------------------------------------------------------
+
+// runWith executes one cycle over the given commits (newest first) against a
+// manifest holding `current`, returning the fake forge and everything logged.
+func runWith(t *testing.T, cfg *config.Config, current string, commits ...forge.Commit) (*fakeForge, string) {
+	t.Helper()
+	f := newFake()
+	f.commits["."] = commits
+	l := &logSink{}
+	opts := Options{TargetBranch: "main", Now: fixedClock(), Logf: l.logf}
+	if err := Run(context.Background(), f, cfg, config.Manifest{".": current}, opts); err != nil {
+		t.Fatal(err)
+	}
+	return f, l.text()
+}
+
+// releaseAsConfig is goConfig with a package-level "release-as".
+func releaseAsConfig(t *testing.T, releaseAs string) *config.Config {
+	t.Helper()
+	cfg, err := config.ParseConfig([]byte(`{
+      "release-type": "go",
+      "packages": { ".": { "component": "root", "release-as": "` + releaseAs + `" } }
+    }`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// wantPRAt asserts exactly one release PR was opened for version v and that v
+// reached every place the computed version is used: PR title, PR body,
+// changelog heading and manifest (the tag is cut from the manifest on merge —
+// see TestTagOnMerge).
+func wantPRAt(t *testing.T, f *fakeForge, v string) {
+	t.Helper()
+	if len(f.created) != 1 {
+		t.Fatalf("expected 1 release PR, got %d", len(f.created))
+	}
+	if got, want := f.created[0].Title, "chore(release): "+v; got != want {
+		t.Errorf("PR title = %q, want %q", got, want)
+	}
+	if body := f.created[0].Body; !strings.Contains(body, v) {
+		t.Errorf("PR body does not mention %s:\n%s", v, body)
+	}
+	if cl := f.puts["releasejo--branches--main\x00CHANGELOG.md"]; !strings.Contains(cl, "## "+v+" (") {
+		t.Errorf("changelog heading is not %q:\n%s", "## "+v, cl)
+	}
+	if man := f.puts["releasejo--branches--main\x00.release-please-manifest.json"]; !strings.Contains(man, `"`+v+`"`) {
+		t.Errorf("manifest not set to %s:\n%s", v, man)
+	}
+}
+
+// A "Release-As:" footer pins the release: a fix on 0.0.5 would bump to 0.0.6,
+// the footer makes it 0.1.0 — in the title, body, changelog and manifest alike.
+func TestReleaseAsFooterHonoured(t *testing.T) {
+	f, _ := runWith(t, goConfig(), "0.0.5",
+		forge.Commit{SHA: "c1", Message: "fix: correct a boundary check\n\nRelease-As: 0.1.0"})
+	wantPRAt(t, f, "0.1.0")
+}
+
+// With a footer on several commits the NEWEST wins (commits arrive newest-first).
+func TestReleaseAsNewestFooterWins(t *testing.T) {
+	f, _ := runWith(t, goConfig(), "0.0.5",
+		forge.Commit{SHA: "c2", Message: "fix: later fix\n\nRelease-As: 0.3.0"},
+		forge.Commit{SHA: "c1", Message: "fix: earlier fix\n\nRelease-As: 0.2.0"})
+	wantPRAt(t, f, "0.3.0")
+}
+
+// The config key is honoured, and beats a commit footer (release-please precedence).
+func TestReleaseAsConfigWinsOverFooter(t *testing.T) {
+	f, _ := runWith(t, releaseAsConfig(t, "1.0.0"), "0.0.5",
+		forge.Commit{SHA: "c1", Message: "fix: a fix\n\nRelease-As: 0.9.0"})
+	wantPRAt(t, f, "1.0.0")
+}
+
+// A value that is not a semver is ignored with a warning; the normal bump applies.
+func TestReleaseAsInvalidIgnored(t *testing.T) {
+	t.Run("footer", func(t *testing.T) {
+		f, logged := runWith(t, goConfig(), "1.2.3",
+			forge.Commit{SHA: "c1", Message: "fix: a fix\n\nRelease-As: banana"})
+		wantPRAt(t, f, "1.2.4")
+		if !strings.Contains(logged, `ignoring release-as "banana"`) {
+			t.Errorf("expected a warning about the invalid value, got:\n%s", logged)
+		}
+	})
+	t.Run("config", func(t *testing.T) {
+		f, logged := runWith(t, releaseAsConfig(t, "1.2"), "1.2.3",
+			forge.Commit{SHA: "c1", Message: "fix: a fix"})
+		wantPRAt(t, f, "1.2.4")
+		if !strings.Contains(logged, `ignoring release-as "1.2"`) || !strings.Contains(logged, "config release-as") {
+			t.Errorf("expected a warning about the invalid config value, got:\n%s", logged)
+		}
+	})
+}
+
+// Releases never go backwards: a request at or below the current version is
+// refused with a warning and the normal bump applies.
+func TestReleaseAsNotGreaterRefused(t *testing.T) {
+	for _, want := range []string{"0.0.9", "0.1.0"} {
+		t.Run(want, func(t *testing.T) {
+			f, logged := runWith(t, goConfig(), "0.1.0",
+				forge.Commit{SHA: "c1", Message: "fix: a fix\n\nRelease-As: " + want})
+			wantPRAt(t, f, "0.1.1")
+			if !strings.Contains(logged, "not greater than the current version 0.1.0") {
+				t.Errorf("expected a not-greater warning, got:\n%s", logged)
+			}
+		})
+	}
+}
+
+// Once the requested version is released the footer is inert, two ways over:
+// the commit carrying it is behind the tag boundary, so it is not even parsed,
+// and a fresh commit asking for the version already released is refused.
+func TestReleaseAsNoEffectOnceTagged(t *testing.T) {
+	t.Run("commit behind the tag boundary", func(t *testing.T) {
+		f := newFake()
+		f.tags["v0.1.0"] = "c1" // the release-as commit is what v0.1.0 points at
+		f.commits["."] = []forge.Commit{
+			{SHA: "c2", Message: "docs: tweak readme"},
+			{SHA: "c1", Message: "feat: add the thing\n\nRelease-As: 0.1.0"},
+		}
+		l := &logSink{}
+		man := config.Manifest{".": "0.1.0"}
+		opts := Options{TargetBranch: "main", Now: fixedClock(), Logf: l.logf}
+		if err := Run(context.Background(), f, goConfig(), man, opts); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.created) != 0 {
+			t.Errorf("expected no PR (only docs since the tag), got %d", len(f.created))
+		}
+	})
+	t.Run("asking again is refused", func(t *testing.T) {
+		f, logged := runWith(t, goConfig(), "0.1.0",
+			forge.Commit{SHA: "c3", Message: "fix: later fix\n\nRelease-As: 0.1.0"})
+		wantPRAt(t, f, "0.1.1")
+		if !strings.Contains(logged, "not greater than the current version 0.1.0") {
+			t.Errorf("expected a not-greater warning, got:\n%s", logged)
+		}
+	})
+}
+
+// The footer key is case-insensitive and a leading "v" is tolerated.
+func TestReleaseAsCaseAndVPrefix(t *testing.T) {
+	for _, footer := range []string{
+		"Release-As: 0.2.0",
+		"release-as: 0.2.0",
+		"RELEASE-AS: 0.2.0",
+		"Release-As: v0.2.0",
+		"release-as: V0.2.0",
+	} {
+		t.Run(footer, func(t *testing.T) {
+			f, _ := runWith(t, goConfig(), "0.1.0",
+				forge.Commit{SHA: "c1", Message: "fix: a fix\n\n" + footer})
+			wantPRAt(t, f, "0.2.0") // not the 0.1.1 a plain fix would give
+		})
+	}
+}
+
+// release-please opens a release PR for a Release-As request even when no commit
+// implies a bump, so a chore-only range still releases when one is pinned.
+func TestReleaseAsReleasesWithoutReleasableCommits(t *testing.T) {
+	f, _ := runWith(t, goConfig(), "0.0.5",
+		forge.Commit{SHA: "c1", Message: "chore: tidy up\n\nRelease-As: 0.1.0"})
+	wantPRAt(t, f, "0.1.0")
+}
+
+// ...but with nothing at all since the tag there is still no release: a config
+// release-as alone must not reopen a PR for an already-released tree.
+func TestReleaseAsNoCommitsSinceTag(t *testing.T) {
+	f, _ := runWith(t, releaseAsConfig(t, "1.0.0"), "0.0.5")
+	if len(f.created) != 0 {
+		t.Errorf("expected no PR with no commits since the tag, got %d", len(f.created))
 	}
 }
