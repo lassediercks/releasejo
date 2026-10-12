@@ -143,7 +143,10 @@ On every push to the target branch, `releasejo`:
    files + the manifest, and opens or refreshes the `autorelease: pending` PR.
 
 The release branch is always rebuilt from the base branch's content, so
-re-running never stacks duplicate changelog entries.
+re-running never stacks duplicate changelog entries. Rebuilding deletes and
+recreates the head branch — which makes Forgejo close the PR — so a refresh
+reopens and reuses the same release PR instead of opening a new one: the release
+PR keeps one number for the whole cycle.
 
 ## Status & scope (v0.x)
 

@@ -304,8 +304,14 @@ func (c *Client) CreatePull(ctx context.Context, head, base, title, body string)
 	return &p, err
 }
 
+// EditPull refreshes a PR's title/body and REOPENS it. The state is sent on
+// every edit on purpose: resetting the release branch deletes its head branch,
+// and Forgejo closes any PR whose head branch is deleted — so a refreshed
+// release PR is routinely closed by the time (or just after) we edit it.
+// Sending "state":"open" makes the refresh idempotent; on an already-open PR it
+// is a no-op.
 func (c *Client) EditPull(ctx context.Context, number int, title, body string) error {
-	req := map[string]any{"title": title, "body": body}
+	req := map[string]any{"title": title, "body": body, "state": "open"}
 	return c.do(ctx, "PATCH", c.urlf("/repos/%s/%s/pulls/%d", c.owner, c.repo, number), req, nil)
 }
 

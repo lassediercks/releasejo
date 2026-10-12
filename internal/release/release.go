@@ -38,7 +38,7 @@ type API interface {
 	ChangeFiles(ctx context.Context, branch, message string, files []forge.FileChange) error
 	Pulls(ctx context.Context, state string) ([]forge.Pull, error)
 	CreatePull(ctx context.Context, head, base, title, body string) (*forge.Pull, error)
-	EditPull(ctx context.Context, number int, title, body string) error
+	EditPull(ctx context.Context, number int, title, body string) error // refreshes AND reopens
 	EnsureLabel(ctx context.Context, name, color string) (int64, error)
 	SetIssueLabels(ctx context.Context, number int, ids []int64) error
 	CreateRelease(ctx context.Context, tag, target, name, body string, prerelease bool) error
@@ -196,15 +196,34 @@ func buildAndUpsertPR(ctx context.Context, cl API, man config.Manifest, plans []
 		return nil
 	}
 
+	// Find the release PR BEFORE touching the branch. Deleting the head branch
+	// (below) makes Forgejo close the PR, and a PR closed mid-run may already be
+	// out of the "open" listing by the time we look — which is how 0.0.5 opened a
+	// fresh PR on nearly every run (#23–#26, #29, #30 …). Looking first pins the
+	// number we then refresh and reopen.
+	pr, err := findReleasePR(ctx, cl, branch)
+	if err != nil {
+		return err
+	}
+
 	// Rebuild the branch from base EVERY run so its tree matches base except for
 	// the release files. Without this the branch stays frozen at its fork point:
 	// non-release files (e.g. a CI workflow fixed on main) stay stale — so the
 	// release PR runs outdated config while main is green — and release commits
 	// stack (repeated identical versions). Delete-then-recreate is the API-only
-	// equivalent of release-please's force-push; on Forgejo the open PR survives
-	// a head-branch delete+recreate (verified), so the existing PR is reused
-	// below rather than churned. Only reached when there IS a release to make
-	// (callers gate on len(plans) > 0), so this can never reset a no-op branch.
+	// equivalent of release-please's force-push, and the reset is what advances
+	// the branch onto the new base: writing files onto the existing branch would
+	// converge the release files (collectChanges always derives them from base)
+	// but leave the rest of the tree behind main, so the reset stays.
+	//
+	// Forgejo CLOSES a PR whose head branch is deleted (it does not survive the
+	// delete+recreate, contrary to what this comment claimed before #93 was found
+	// closed right after a "refreshing release PR" run). That is why EditPull
+	// sends state:"open" and why the PR is located above: the refresh reopens the
+	// same PR instead of leaving it closed or opening another one.
+	//
+	// Only reached when there IS a release to make (callers gate on
+	// len(plans) > 0), so this can never reset a no-op branch.
 	exists, err := cl.BranchExists(ctx, branch)
 	if err != nil {
 		return err
@@ -233,25 +252,22 @@ func buildAndUpsertPR(ctx context.Context, cl API, man config.Manifest, plans []
 		}
 	}
 
-	// open or refresh the PR
-	open, err := findOpenReleasePR(ctx, cl, branch)
-	if err != nil {
-		return err
+	// Refresh the PR we found (reopening it if the branch reset closed it), or
+	// open one if there is none.
+	if pr != nil {
+		opts.Logf("refreshing release PR #%d (was %s)", pr.Number, prState(pr))
+		return cl.EditPull(ctx, pr.Number, title, body)
 	}
-	if open != nil {
-		opts.Logf("refreshing release PR #%d", open.Number)
-		return cl.EditPull(ctx, open.Number, title, body)
-	}
-	pr, err := cl.CreatePull(ctx, branch, opts.TargetBranch, title, body)
+	created, err := cl.CreatePull(ctx, branch, opts.TargetBranch, title, body)
 	if err != nil {
 		return fmt.Errorf("creating release PR: %w", err)
 	}
-	opts.Logf("opened release PR #%d", pr.Number)
+	opts.Logf("opened release PR #%d", created.Number)
 	id, err := cl.EnsureLabel(ctx, pendingLabel, labelColor)
 	if err != nil {
 		return err
 	}
-	return cl.SetIssueLabels(ctx, pr.Number, []int64{id})
+	return cl.SetIssueLabels(ctx, created.Number, []int64{id})
 }
 
 // tagMerged looks for a just-merged release PR and cuts the tags/releases its
@@ -372,17 +388,46 @@ func readFileOr(ctx context.Context, cl API, path, ref string) (string, error) {
 	return f.Content, nil
 }
 
-func findOpenReleasePR(ctx context.Context, cl API, branch string) (*forge.Pull, error) {
-	open, err := cl.Pulls(ctx, "open")
+// findReleasePR locates the release PR for a release branch: the open PR whose
+// head is that branch, or else the most recent CLOSED-but-UNMERGED one carrying
+// the pending label — which is exactly what a branch reset leaves behind, since
+// Forgejo closes a PR when its head branch is deleted. Reusing that PR (the
+// caller refreshes it, and EditPull reopens it) is what stops the number from
+// churning on every run.
+//
+// A MERGED PR is never a candidate: that one is already released, and cutting
+// its tags is tagMerged's business. The pending label is required so an
+// unrelated closed PR on the same branch name is left alone.
+func findReleasePR(ctx context.Context, cl API, branch string) (*forge.Pull, error) {
+	all, err := cl.Pulls(ctx, "all")
 	if err != nil {
 		return nil, err
 	}
-	for i := range open {
-		if open[i].Head.Ref == branch {
-			return &open[i], nil
+	var closed *forge.Pull
+	for i := range all {
+		p := &all[i]
+		if p.Head.Ref != branch || p.Merged {
+			continue
+		}
+		if p.State == "open" {
+			return p, nil // an open PR always wins
+		}
+		// Pick the newest candidate by number rather than trusting the API's
+		// listing order.
+		if hasLabel(*p, pendingLabel) && (closed == nil || p.Number > closed.Number) {
+			closed = p
 		}
 	}
-	return nil, nil
+	return closed, nil
+}
+
+// prState renders a PR's state for logs ("open"/"closed"), tolerating an
+// instance that omits it.
+func prState(p *forge.Pull) string {
+	if p.State == "" {
+		return "unknown"
+	}
+	return p.State
 }
 
 func changelogOnMain(ctx context.Context, cl API, p config.Package, opts Options) string {
