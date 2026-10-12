@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.6](https://github.com/lassediercksAI/releasejo/compare/v0.0.5...v0.0.6) (2026-10-12)
+
+
+### Features
+
+* honour Release-As from a commit footer or the config ([9818ecd](https://github.com/lassediercksAI/releasejo/commit/9818ecd926b2b393bd8848f7081242741cb140d1))
+* honour Release-As from a commit footer or the config ([8ebb76a](https://github.com/lassediercksAI/releasejo/commit/8ebb76a522bdbef6b3681b054e5519c0d5d3840c))
+
 ## [0.0.5](https://github.com/lassediercksAI/releasejo/compare/v0.0.4...v0.0.5) (2026-08-10)
 
 
