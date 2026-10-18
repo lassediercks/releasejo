@@ -128,12 +128,24 @@ func computePlans(ctx context.Context, cl API, cfg *config.Config, man config.Ma
 		if err != nil {
 			return nil, fmt.Errorf("package %q: listing commits: %w", p.Path, err)
 		}
+		// The tag commit only bounds the walk when it touches the package path.
+		// In a monorepo the tag sits on a release merge that touches only the
+		// manifest and changelog, so it never appears in a path-filtered list
+		// and every commit would count as unreleased again — re-releasing the
+		// package on every merge. Exclude everything reachable from the tag.
+		released, err := releasedCommits(ctx, cl, boundary, p.Path, opts.MaxCommits)
+		if err != nil {
+			return nil, fmt.Errorf("package %q: listing released commits: %w", p.Path, err)
+		}
 
 		var ccs []conventional.Commit
 		level := semver.None
 		for _, rc := range raw {
 			if boundary != "" && rc.SHA == boundary {
 				break // reached the last release
+			}
+			if released[rc.SHA] {
+				continue // already part of the last release
 			}
 			cc := conventional.Parse(rc.Message, rc.SHA)
 			if isReleaseCommit(cc) {
@@ -338,11 +350,11 @@ func collectChanges(ctx context.Context, cl API, man config.Manifest, plans []pk
 	}
 
 	for _, pl := range plans {
-		base, err := readFileOr(ctx, cl, pl.pkg.ChangelogPath, opts.TargetBranch)
+		base, err := readFileOr(ctx, cl, changelogPath(pl.pkg), opts.TargetBranch)
 		if err != nil {
 			return nil, fmt.Errorf("%s: changelog: %w", label(pl.pkg), err)
 		}
-		want(pl.pkg.ChangelogPath, changelog.Prepend(base, pl.entry))
+		want(changelogPath(pl.pkg), changelog.Prepend(base, pl.entry))
 
 		for _, f := range versionFiles(pl.pkg) {
 			base, err := readFileOr(ctx, cl, f, opts.TargetBranch)
@@ -431,7 +443,7 @@ func prState(p *forge.Pull) string {
 }
 
 func changelogOnMain(ctx context.Context, cl API, p config.Package, opts Options) string {
-	f, err := cl.GetFile(ctx, p.ChangelogPath, opts.TargetBranch)
+	f, err := cl.GetFile(ctx, changelogPath(p), opts.TargetBranch)
 	if err != nil {
 		return ""
 	}
@@ -644,6 +656,29 @@ func short(s string) string {
 	}
 	return s
 }
+
+// releasedCommits returns the SHAs of the package's commits reachable from the
+// last release tag, or nil when there is no tag yet.
+func releasedCommits(ctx context.Context, cl API, boundary, path string, max int) (map[string]bool, error) {
+	if boundary == "" {
+		return nil, nil
+	}
+	cs, err := cl.Commits(ctx, boundary, path, max)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool, len(cs))
+	for _, c := range cs {
+		out[c.SHA] = true
+	}
+	return out, nil
+}
+
+// changelogPath resolves a package's changelog-path relative to the package
+// directory, as release-please does: packages/foo with the default
+// "CHANGELOG.md" writes packages/foo/CHANGELOG.md, not the root changelog.
+func changelogPath(p config.Package) string { return join(p.Path, p.ChangelogPath) }
+
 func join(base, f string) string {
 	if base == "" || base == "." {
 		return f

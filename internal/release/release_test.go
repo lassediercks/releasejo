@@ -15,11 +15,14 @@ import (
 // fakeForge is an in-memory API implementation for testing the orchestrator
 // without a live Forgejo instance.
 type fakeForge struct {
-	tags     map[string]string         // tag -> sha
-	commits  map[string][]forge.Commit // path -> commits (newest first)
-	files    map[string]*forge.File    // "ref\x00path" -> file
-	branches map[string]bool           // branch -> exists
-	pulls    []forge.Pull              // all PRs
+	tags    map[string]string         // tag -> sha
+	commits map[string][]forge.Commit // path -> commits (newest first)
+	// commitsAt overrides commits for a specific ref: "ref\x00path". Used to
+	// model history as seen from a release tag.
+	commitsAt map[string][]forge.Commit
+	files     map[string]*forge.File // "ref\x00path" -> file
+	branches  map[string]bool        // branch -> exists
+	pulls     []forge.Pull           // all PRs
 
 	puts        map[string]string // "branch\x00path" -> content written
 	commitCount int               // number of ChangeFiles commits made
@@ -44,7 +47,7 @@ func (f *fakeForge) pull(number int) *forge.Pull {
 
 func newFake() *fakeForge {
 	return &fakeForge{
-		tags: map[string]string{}, commits: map[string][]forge.Commit{},
+		tags: map[string]string{}, commits: map[string][]forge.Commit{}, commitsAt: map[string][]forge.Commit{},
 		files: map[string]*forge.File{}, branches: map[string]bool{},
 		puts: map[string]string{}, labelSet: map[int][]int64{},
 	}
@@ -54,7 +57,13 @@ func notFound() error { return &forge.APIError{Status: http.StatusNotFound, Body
 
 func (f *fakeForge) TagCommit(_ context.Context, tag string) (string, error) { return f.tags[tag], nil }
 
-func (f *fakeForge) Commits(_ context.Context, _, path string, _ int) ([]forge.Commit, error) {
+func (f *fakeForge) Commits(_ context.Context, ref, path string, _ int) ([]forge.Commit, error) {
+	if cs, ok := f.commitsAt[ref+"\x00"+path]; ok {
+		return cs, nil
+	}
+	if ref != "main" {
+		return nil, nil // history at a tag is only modelled via commitsAt
+	}
 	return f.commits[path], nil
 }
 
@@ -642,5 +651,96 @@ func TestRefreshKeepsPRNumberAcrossRuns(t *testing.T) {
 	}
 	if pr := f.pull(number); pr == nil || pr.State != "open" {
 		t.Fatalf("PR #%d must be open after the second run, got %+v", number, pr)
+	}
+}
+
+// In a monorepo the release tag points at the release-PR merge, which only
+// touches the manifest and changelog, so it never shows up in the package's
+// path-filtered history. Commits reachable from the tag must still count as
+// released; before this, every merge re-released the same commits forever.
+func TestMonorepoTagOffPathDoesNotReRelease(t *testing.T) {
+	f := newFake()
+	feat := forge.Commit{SHA: "r1", Message: "feat(ratelimit): limiter"}
+	f.commits["ratelimit"] = []forge.Commit{feat}
+	f.tags["ratelimit/v0.0.1"] = "merge1" // release merge, not on the ratelimit path
+	f.commitsAt["merge1\x00ratelimit"] = []forge.Commit{feat}
+	cfg, err := config.ParseConfig([]byte(`{
+      "release-type": "go",
+      "include-component-in-tag": true,
+      "tag-separator": "/",
+      "separate-pull-requests": true,
+      "packages": {
+        "ratelimit": { "component": "ratelimit" },
+        "csrf": { "component": "csrf" }
+      }
+    }`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	man := config.Manifest{"ratelimit": "0.0.1", "csrf": "0.0.0"}
+	f.commits["csrf"] = []forge.Commit{{SHA: "c1", Message: "feat(csrf): protector"}}
+
+	if err := Run(context.Background(), f, cfg, man, Options{TargetBranch: "main", Now: fixedClock()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, pr := range f.created {
+		if strings.HasSuffix(pr.Head.Ref, "--ratelimit") {
+			t.Fatalf("ratelimit re-released with no new commits: %s", pr.Title)
+		}
+	}
+	if len(f.created) != 1 {
+		t.Fatalf("expected only the csrf release PR, got %d", len(f.created))
+	}
+
+	// A new ratelimit commit after the tag is released.
+	f.commits["ratelimit"] = []forge.Commit{{SHA: "r2", Message: "fix(ratelimit): retry-after"}, feat}
+	f.created = nil
+	if err := Run(context.Background(), f, cfg, man, Options{TargetBranch: "main", Now: fixedClock()}); err != nil {
+		t.Fatal(err)
+	}
+	var got bool
+	for _, pr := range f.created {
+		if strings.HasSuffix(pr.Head.Ref, "--ratelimit") {
+			got = true
+			if pr.Title != "chore(release): 0.0.2" {
+				t.Errorf("ratelimit title = %q, want chore(release): 0.0.2", pr.Title)
+			}
+		}
+	}
+	if !got {
+		t.Fatal("new ratelimit commit after the tag was not released")
+	}
+}
+
+// changelog-path is relative to the package, as in release-please.
+func TestMonorepoChangelogPerPackage(t *testing.T) {
+	f := newFake()
+	f.commits["services/api"] = []forge.Commit{{SHA: "a1", Message: "feat: api thing"}}
+	cfg, err := config.ParseConfig([]byte(`{
+      "release-type": "go",
+      "packages": {
+        ".": { "component": "root" },
+        "services/api": { "component": "api" }
+      }
+    }`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	man := config.Manifest{".": "1.0.0", "services/api": "1.0.0"}
+	if err := Run(context.Background(), f, cfg, man, Options{TargetBranch: "main", Now: fixedClock()}); err != nil {
+		t.Fatal(err)
+	}
+	var wrote []string
+	for k := range f.puts {
+		wrote = append(wrote, k[strings.IndexByte(k, 0)+1:])
+	}
+	joined := strings.Join(wrote, ",")
+	if !strings.Contains(joined, "services/api/CHANGELOG.md") {
+		t.Errorf("api changelog not written under its package: %v", wrote)
+	}
+	for _, w := range wrote {
+		if w == "CHANGELOG.md" {
+			t.Errorf("api release wrote the root changelog: %v", wrote)
+		}
 	}
 }
