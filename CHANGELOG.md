@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.9](https://github.com/lassediercksAI/releasejo/compare/v0.0.8...v0.0.9) (2026-10-19)
+
+
+### Bug Fixes
+
+* don't tag never-released packages when another release PR merges ([52ba296](https://github.com/lassediercksAI/releasejo/commit/52ba296f0f8f7887987f3cfa317b55eaaeeac5fa))
+* don't tag never-released packages when another release PR merges ([b225a9d](https://github.com/lassediercksAI/releasejo/commit/b225a9d7ecd91953a261543d2c7398e0e4163a4b))
+
 ## [0.0.8](https://github.com/lassediercksAI/releasejo/compare/v0.0.7...v0.0.8) (2026-10-19)
 
 
