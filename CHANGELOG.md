@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.8](https://github.com/lassediercksAI/releasejo/compare/v0.0.7...v0.0.8) (2026-10-19)
+
+
+### Bug Fixes
+
+* stop re-releasing monorepo packages, write changelogs per package ([101eaa9](https://github.com/lassediercksAI/releasejo/commit/101eaa9fafbec2f34311b895e30d420ae4116c6e))
+* stop re-releasing monorepo packages, write changelogs per package ([93bf1eb](https://github.com/lassediercksAI/releasejo/commit/93bf1eb0b42e9da296f36af355c729b465a7159b))
+
 ## [0.0.7](https://github.com/lassediercksAI/releasejo/compare/v0.0.6...v0.0.7) (2026-10-12)
 
 
