@@ -744,3 +744,34 @@ func TestMonorepoChangelogPerPackage(t *testing.T) {
 		}
 	}
 }
+
+// Merging one component's release PR must not tag the packages that have never
+// been released: their manifest still says 0.0.0, and a 0.0.0 tag would count
+// all their commits as released, so their first release PR would never come.
+func TestTagOnMergeSkipsUnreleasedPackages(t *testing.T) {
+	f := newFake()
+	merged := forge.Pull{Number: 9, State: "closed", Merged: true, MergeCommitSHA: "mmm",
+		Labels: []forge.Label{{ID: 7, Name: pendingLabel}}}
+	f.pulls = []forge.Pull{merged}
+	cfg, err := config.ParseConfig([]byte(`{
+      "release-type": "go",
+      "include-component-in-tag": true,
+      "tag-separator": "/",
+      "separate-pull-requests": true,
+      "packages": {
+        "csrf": { "component": "csrf" },
+        "authn": { "component": "authn" }
+      }
+    }`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	man := config.Manifest{"csrf": "0.0.1", "authn": "0.0.0"}
+
+	if err := Run(context.Background(), f, cfg, man, Options{TargetBranch: "main", Now: fixedClock()}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.releases) != 1 || f.releases[0] != "csrf/v0.0.1" {
+		t.Fatalf("expected only csrf/v0.0.1, got %v", f.releases)
+	}
+}
