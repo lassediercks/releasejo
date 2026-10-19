@@ -3,4 +3,4 @@
 // generic updater — see release-please-config.json extra-files).
 package version
 
-const Version = "0.0.7" // x-release-please-version
+const Version = "0.0.8" // x-release-please-version
