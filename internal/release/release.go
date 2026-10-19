@@ -299,6 +299,12 @@ func tagMerged(ctx context.Context, cl API, cfg *config.Config, man config.Manif
 			if err != nil {
 				return err
 			}
+			// 0.0.0 is the manifest's "never released" placeholder, not a
+			// version anyone merged. Tagging it would mark every commit as
+			// released, so the package's real first release would never come.
+			if v.String() == "0.0.0" {
+				continue
+			}
 			tag := TagFor(cfg, p, v)
 			existing, err := cl.TagCommit(ctx, tag)
 			if err != nil {
